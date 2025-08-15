@@ -1,9 +1,11 @@
 use crate::event::Event;
 use crc32fast::Hasher;
+use std::collections::HashMap;
 use std::fs::read_to_string;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{
     collections::BTreeMap,
+    fs,
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     time::{SystemTime, UNIX_EPOCH},
@@ -26,17 +28,12 @@ impl Writer {
     const HDR_NEXT_ID_OFF: u64 = 4 + 2; // MAGIC(4) + VERSION(2) = 6
 
     pub fn new(f: File) -> Self {
-        // Fallback value; create() should be used to properly initialize from the header.
         Self { f, next_id: 1 }
     }
 
     pub fn append_file<P: AsRef<Path>>(&mut self, filepath: P) -> io::Result<()> {
-        let name = filepath
-            .as_ref()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // Store the full path so we can rebuild an accurate seen index later
+        let name = filepath.as_ref().to_string_lossy().to_string();
 
         let content = read_to_string(&filepath)?;
 
@@ -75,6 +72,117 @@ impl Writer {
         Ok(Self { f, next_id })
     }
 
+    // Build a map of path -> last known content hash from the log
+    fn rebuild_seen_index_from_log(&mut self) -> HashMap<PathBuf, String> {
+        let mut seen = HashMap::new();
+
+        // Save current position and scan from the beginning
+        let saved_pos = self.f.stream_position().ok();
+        if Self::read_and_validate_header(&mut self.f).is_err() {
+            // If header invalid, return empty (safe fallback)
+            if let Some(pos) = saved_pos {
+                let _ = self.f.seek(SeekFrom::Start(pos));
+            }
+            return seen;
+        }
+        if self.f.seek(SeekFrom::Start(Self::HEADER_LEN)).is_err() {
+            if let Some(pos) = saved_pos {
+                let _ = self.f.seek(SeekFrom::Start(pos));
+            }
+            return seen;
+        }
+
+        // Iterate all valid entries; last one for a given path wins
+        while let Ok(Some((_len, payload))) = Self::read_valid_entry(&mut self.f) {
+            if let Ok(Some((_ts, _id, ph, no))) = Self::parse_payload(&payload) {
+                // Hash the stored content to compare against filesystem later
+                let hash = blake3::hash(no.as_bytes()).to_hex().to_string();
+                seen.insert(PathBuf::from(ph), hash);
+            }
+        }
+
+        // Restore previous position
+        if let Some(pos) = saved_pos {
+            let _ = self.f.seek(SeekFrom::Start(pos));
+        }
+        seen
+    }
+
+    fn file_hash<P: AsRef<Path>>(&mut self, p: P) -> io::Result<String> {
+        let bytes = fs::read(p)?;
+        Ok(blake3::hash(&bytes).to_hex().to_string())
+    }
+
+    pub fn store_directory<P: AsRef<Path>>(&mut self, dir: P) -> io::Result<()> {
+        let mut seen: HashMap<PathBuf, String> = self.rebuild_seen_index_from_log();
+
+        // Collect files
+        let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(dir)
+            .add_custom_ignore_filename(".ignore")
+            .build()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_type()
+                    .expect("failed to get the file type")
+                    .is_file()
+            })
+            .map(|e| e.into_path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if name.starts_with('.') {
+                    return false;
+                }
+                if p.components()
+                    .any(|c| c.as_os_str() == "target" || c.as_os_str() == ".git")
+                {
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        files.sort(); // stable order
+
+        // progress bar (indicatif)
+        use indicatif::{ProgressBar, ProgressStyle};
+        let pb = ProgressBar::new(files.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+
+        for path in files {
+            let h = match self.file_hash(&path) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("hash fail {}: {e}", path.display());
+                    pb.inc(1);
+                    continue;
+                }
+            };
+
+            pb.set_message(format!("{}", path.file_name().unwrap().to_string_lossy()));
+
+            // Dedup: if last stored content hash is the same, skip
+            let is_same = seen.get(&path).map(|old| old == &h).unwrap_or(false);
+            if !is_same {
+                if let Err(e) = self.append_file(&path) {
+                    eprintln!("store fail {}: {e}", path.display());
+                } else {
+                    // Update seen with the new content hash
+                    seen.insert(path.clone(), h);
+                }
+            }
+
+            pb.inc(1);
+        }
+
+        pb.finish_with_message("Done!");
+        Ok(())
+    }
+
     fn write_header(f: &mut File, next_id: u64) -> io::Result<()> {
         f.seek(SeekFrom::Start(0))?;
         f.write_all(Self::MAGIC.as_ref())?;
@@ -109,13 +217,13 @@ impl Writer {
     }
 
     fn read_and_validate_header(f: &mut File) -> io::Result<()> {
-        f.stream_position()?;
+        // Ensure we read header from the beginning
+        f.seek(SeekFrom::Start(0))?;
         let mut hdr = [0u8; 16];
         f.read_exact(&mut hdr)?;
         if hdr[0..4] != Self::MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic"));
         }
-        // If versioning matters later, check hdr[4..6]
         Ok(())
     }
 

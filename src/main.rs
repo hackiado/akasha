@@ -23,7 +23,8 @@ fn cli() -> ArgMatches {
                 .subcommand(
                     Command::new("directory")
                         .about("Save directory content in a cube")
-                        .arg(Arg::new("directory").required(true)),
+                        .arg(Arg::new("path").required(true))
+                        .arg(Arg::new("of").required(true)),
                 )
                 .subcommand(
                     Command::new("hierarchy")
@@ -133,10 +134,26 @@ fn main() {
                 // Use Writer::create to append without truncating and keep header/id state
                 let mut writer = Writer::create(cube.as_str()).expect("failed to open/create cube");
                 writer
-                    .append_file(Path::new(name))
-                    .expect("failed to save the file to the cube");
+                    .store_directory(name)
+                    .expect("failed to save the directory content to the cube");
 
                 println!("File saved successfully.");
+            }
+            Some(("directory", file_matches)) => {
+                let cube: &String = file_matches
+                    .get_one::<String>("of")
+                    .expect("of is required");
+                let name: &String = file_matches
+                    .get_one::<String>("path")
+                    .expect("if is required");
+                println!("Saving directory {name} content to the {cube} cube");
+
+                // Use Writer::create to append without truncating and keep header/id state
+                let mut writer = Writer::create(cube.as_str()).expect("failed to open/create cube");
+                writer
+                    .store_directory(Path::new(name))
+                    .expect("failed to save the directory to the cube");
+
             }
             Some((cmd, _)) => {
                 println!("save subcommand: {cmd}");
