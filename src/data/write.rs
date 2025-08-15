@@ -1,4 +1,3 @@
-use crate::event::Event;
 use crc32fast::Hasher;
 use std::collections::HashMap;
 use std::fs::read_to_string;
@@ -10,6 +9,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     time::{SystemTime, UNIX_EPOCH},
 };
+use crate::event::Event;
 
 pub struct Writer {
     f: File,
