@@ -11,6 +11,26 @@ fn cli() -> ArgMatches {
         .about("A CLI for the Akasha Living Wisdom System")
         .version("0.1.0")
         .author("hackiado <seidogitan@example.com>")
+        .subcommand(
+            Command::new("save")
+                .about("Probe semantic hyperspace with a query")
+                .subcommand(
+                    Command::new("file")
+                        .about("Save a file in a cube")
+                        .arg(Arg::new("if").required(true))
+                        .arg(Arg::new("of").required(true)),
+                )
+                .subcommand(
+                    Command::new("directory")
+                        .about("Save directory content in a cube")
+                        .arg(Arg::new("directory").required(true)),
+                )
+                .subcommand(
+                    Command::new("hierarchy")
+                        .about("Save a tree structure in a cube")
+                        .arg(Arg::new("directory").required(true)),
+                ),
+        )
         .subcommand(Command::new("sonar").about("Probe semantic hyperspace with a query"))
         .subcommand(Command::new("merge").about("Merge multiple cubes into one"))
         .subcommand(Command::new("connect").about("Connect two cubes to exchange wisdom"))
@@ -88,7 +108,7 @@ fn main() {
                         .read_all()
                         .expect("failed to read cube file");
                     println!("Cube reading successfully.");
-                }else{
+                } else {
                     println!("Cube not exists.");
                 }
             }
@@ -97,6 +117,32 @@ fn main() {
             }
             None => {
                 println!("Use a cube subcommand (e.g., create, start, stop, ...)");
+            }
+        }
+    } else if let Some(("save", save_matches)) = app.subcommand() {
+        match save_matches.subcommand() {
+            Some(("file", file_matches)) => {
+                let cube: &String = file_matches
+                    .get_one::<String>("of")
+                    .expect("of is required");
+                let name: &String = file_matches
+                    .get_one::<String>("if")
+                    .expect("if is required");
+                println!("Saving filename {name} to the {cube} cube");
+
+                // Use Writer::create to append without truncating and keep header/id state
+                let mut writer = Writer::create(cube.as_str()).expect("failed to open/create cube");
+                writer
+                    .append_file(Path::new(name))
+                    .expect("failed to save the file to the cube");
+
+                println!("File saved successfully.");
+            }
+            Some((cmd, _)) => {
+                println!("save subcommand: {cmd}");
+            }
+            None => {
+                println!("Use a save subcommand (e.g., file, directory, hierarchy)");
             }
         }
     } else {
