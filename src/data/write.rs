@@ -76,7 +76,7 @@ impl Writer {
     fn rebuild_seen_index_from_log(&mut self) -> HashMap<PathBuf, String> {
         let mut seen = HashMap::new();
 
-        // Save current position and scan from the beginning
+        // Save the current position and scan from the beginning
         let saved_pos = self.f.stream_position().ok();
         if Self::read_and_validate_header(&mut self.f).is_err() {
             // If header invalid, return empty (safe fallback)
@@ -92,7 +92,7 @@ impl Writer {
             return seen;
         }
 
-        // Iterate all valid entries; last one for a given path wins
+        // Iterate all valid entries; the last one for a given path wins
         while let Ok(Some((_len, payload))) = Self::read_valid_entry(&mut self.f) {
             if let Ok(Some((_ts, _id, ph, no))) = Self::parse_payload(&payload) {
                 // Hash the stored content to compare against filesystem later
@@ -165,7 +165,7 @@ impl Writer {
 
             pb.set_message(format!("{}", path.file_name().unwrap().to_string_lossy()));
 
-            // Dedup: if last stored content hash is the same, skip
+            // Dedup: if the last stored content hash is the same, skip
             let is_same = seen.get(&path).map(|old| old == &h).unwrap_or(false);
             if !is_same {
                 if let Err(e) = self.append_file(&path) {
@@ -297,7 +297,7 @@ impl Writer {
         let mut off = Self::HEADER_LEN;
         while let Some((len, payload)) = Self::read_valid_entry(&mut self.f)? {
             if let Some((ts, id, ph, no)) = Self::parse_payload(&payload)? {
-                println!("id={id} ts={ts} ph={ph} no={no}");
+                println!("\nid={id} ts={ts} ph={ph} no={no}\n");
             }
             off = off.saturating_add(4 + len as u64);
         }

@@ -5,13 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Event {
     #[doc = "id of the event"]
-    pub(crate) id: u64,
+    pub id: u64,
     #[doc = "phenomenon of the event"]
-    pub(crate) phenomenon: String,
+    pub phenomenon: String,
     #[doc = "noumenon of the event"]
-    pub(crate) noumenon: String,
+    pub noumenon: String,
     #[doc = "timestamp of the event"]
-    pub(crate) timestamp: u128,
+    pub timestamp: u128,
 }
 
 impl Event {

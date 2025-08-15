@@ -6,6 +6,9 @@ use clap::{Arg, ArgMatches, Command};
 use std::fs::File;
 use std::path::Path;
 
+pub fn echo(s: &str) {
+    println!("\n{s}\n");
+}
 fn cli() -> ArgMatches {
     Command::new("akasha")
         .about("A CLI for the Akasha Living Wisdom System")
@@ -104,11 +107,11 @@ fn main() {
                     let name: &String = create_matches
                         .get_one::<String>("name")
                         .expect("name is required");
-                    println!("Reading cube: {name}");
+                    println!("\nReading cube: {name}\n");
                     Writer::new(File::open(Path::new(name)).expect("failed to open cube file"))
                         .read_all()
                         .expect("failed to read cube file");
-                    println!("Cube reading successfully.");
+                    echo("Cube reading successfully.");
                 } else {
                     println!("Cube not exists.");
                 }
