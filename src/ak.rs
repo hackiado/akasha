@@ -1,5 +1,6 @@
 use crate::data::write::Writer;
 use crate::event::Event;
+use chrono::{DateTime, Utc};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use inquire::{Editor, Select, Text};
 use serde::Serialize;
@@ -31,7 +32,7 @@ struct CommitRecord<'a> {
     body: &'a str,
     author: &'a str,
     author_email: &'a str,
-    timestamp: u128,
+    timestamp: u64,
 }
 
 fn apps() -> ArgMatches {
@@ -76,7 +77,24 @@ fn apps() -> ArgMatches {
                         .action(ArgAction::Set),
                 ),
         )
-        .subcommand(Command::new("timeline").about("show event timeline (commits)"))
+        .subcommand(
+            Command::new("timeline")
+                .about("show event timeline (commits)")
+                .arg(
+                    Arg::new("utc")
+                        .long("utc")
+                        .help("Display timestamps in UTC instead of local time")
+                        .required(false)
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("iso")
+                        .long("iso")
+                        .help("Display timestamps in ISO 8601 format with timezone offset")
+                        .required(false)
+                        .action(ArgAction::SetTrue),
+                ),
+        )
         .subcommand(Command::new("view").about("show the latest commit"))
         .get_matches()
 }
@@ -223,7 +241,8 @@ fn main() {
                 body: &body,
                 author: &author,
                 author_email: &author_email,
-                timestamp: pending_event.timestamp,
+                // Store milliseconds (not nanoseconds) to keep size reasonable and formatting simple
+                timestamp: u64::try_from(pending_event.timestamp / 1_000_000).unwrap_or(0),
             };
             let json = serde_json::to_string_pretty(&record).expect("serialize commit failed");
 
@@ -241,8 +260,10 @@ fn main() {
             );
         }
 
-        Some(("timeline", _)) => {
+        Some(("timeline", sub)) => {
             let cube = cube_path_for(&author);
+            let show_utc = sub.get_flag("utc");
+            let show_iso = sub.get_flag("iso");
             let commits = read_commits_from_cube(&cube).expect("read commits failed");
             if commits.is_empty() {
                 println!("No commits.");
@@ -253,7 +274,13 @@ fn main() {
                 match serde_json::from_str::<serde_json::Value>(&ev.noumenon) {
                     Ok(v) => {
                         let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(ev.id);
-                        let ts = v.get("timestamp").and_then(|x| x.as_u64()).unwrap_or(0);
+                        // timestamp peut être un nombre ou une chaîne (anciens commits)
+                        let ts_raw_u128: Option<u128> = match v.get("timestamp") {
+                            Some(serde_json::Value::Number(n)) => n.as_u64().map(|u| u as u128),
+                            Some(serde_json::Value::String(s)) => s.parse::<u128>().ok(),
+                            _ => None,
+                        };
+
                         let ty = v
                             .get("ty")
                             .and_then(|x| x.as_str())
@@ -264,15 +291,40 @@ fn main() {
                             .and_then(|x| x.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let when = if ts > 0 {
-                            // ts is u128 millis; best-effort format
-                            let dt = chrono::DateTime::<chrono::Local>::from(
-                                std::time::UNIX_EPOCH + std::time::Duration::from_millis(ts),
-                            );
-                            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+
+                        let when = if let Some(ts_raw) = ts_raw_u128 {
+                            // Heuristique: si > 1e15 => probablement nanosecondes, convertir en millisecondes
+                            let mut ts_ms_i128: i128 = ts_raw as i128;
+                            if ts_ms_i128 > 1_000_000_000_000_000_i128 {
+                                ts_ms_i128 /= 1_000_000; // ns -> ms
+                            }
+                            if let Ok(ts_ms) = i64::try_from(ts_ms_i128) {
+                                if let Some(naive) = DateTime::from_timestamp_millis(ts_ms) {
+                                    let utc = DateTime::<Utc>::from(naive);
+                                    if show_utc {
+                                        if show_iso {
+                                            utc.to_rfc3339()
+                                        } else {
+                                            utc.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                        }
+                                    } else {
+                                        let local = utc.with_timezone(&chrono::Local);
+                                        if show_iso {
+                                            local.to_rfc3339()
+                                        } else {
+                                            local.format("%Y-%m-%d %H:%M:%S").to_string()
+                                        }
+                                    }
+                                } else {
+                                    "-".to_string()
+                                }
+                            } else {
+                                "-".to_string()
+                            }
                         } else {
                             "-".to_string()
                         };
+
                         println!("#{id} [{ty}] {summary} @ {when}");
                     }
                     Err(_) => {
