@@ -1,12 +1,15 @@
 use crate::data::write::Writer;
 use crate::event::Event;
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use inquire::{Editor, Select, Text};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::env::var;
 use std::fs::create_dir_all;
-use std::path::MAIN_SEPARATOR_STR;
+use std::io::Error;
+use std::path::{MAIN_SEPARATOR_STR, Path};
+use std::process::ExitCode;
 
 pub mod data;
 pub mod event;
@@ -25,6 +28,47 @@ const COMMIT_TEMPLATE: &str = r#"%type% %summary%
 
 "#;
 
+#[derive(Default)]
+pub struct PreCommit {
+    pub tasks: HashMap<String, HashMap<String, String>>,
+}
+
+impl PreCommit {
+    pub fn new() -> Self {
+        Self {
+            tasks: HashMap::new(),
+        }
+    }
+    pub fn add_task(&mut self, task: &str, program: &str, args: &str) -> &mut Self {
+        let mut x = HashMap::new();
+        x.insert(program.to_string(), args.to_string());
+        self.tasks.insert(task.to_string(), x);
+        self
+    }
+    pub fn run(&self) -> Result<(), Error> {
+        for (name, p) in self.tasks.iter() {
+            for (program, args) in p {
+                if std::process::Command::new(program)
+                    .args(args.split_whitespace())
+                    .current_dir(".")
+                    .spawn()
+                    .expect("")
+                    .wait()
+                    .expect("")
+                    .success()
+                    .eq(&false)
+                {
+                    println!(">> step {name} failed");
+                    return Err(Error::other("test failed"));
+                } else {
+                    println!(">> step {name} passed");
+                    continue;
+                }
+            }
+        }
+        Ok(())
+    }
+}
 // Commit object stored as phenomenon "commit" with noumenon = JSON
 #[derive(Serialize)]
 struct CommitRecord<'a> {
@@ -143,7 +187,19 @@ fn last_commit_id(cube_path: &str) -> std::io::Result<Option<u64>> {
     Ok(commits.last().map(|e| e.id))
 }
 
-fn main() {
+fn hooks() -> Result<(), Error> {
+    if Path::new("Cargo.toml").exists() {
+        println!("cargo project detected");
+        PreCommit::new()
+            .add_task("fmt", "cargo", "fmt --check")
+            .add_task("test", "cargo", "test --no-fail-fast")
+            .add_task("lint", "cargo", "clippy -- -D clippy::all")
+            .run()
+    } else {
+        Ok(())
+    }
+}
+fn main() -> ExitCode {
     let args = apps();
     let author = var(AK_USERNAME).expect("get username failed");
     let author_email = var(AK_EMAIL).expect("get username email failed");
@@ -166,11 +222,13 @@ fn main() {
             // Ensure the current cube file exists
             let cube = cube_path_for(&author);
             let _ = Writer::create(&cube).expect("failed to initialize cube");
-            println!("Initialized repository. Cube: {}", cube);
-            println!("Reference tree: {}", tree_path);
+            println!("Initialized repository. Cube: {cube}");
+            println!("Reference tree: {tree_path}");
+            ExitCode::SUCCESS
         }
 
         Some(("inscribe", sub)) => {
+            assert!(hooks().is_ok(), ">> !! source code refused !!");
             let target = sub
                 .get_one::<String>("path")
                 .map(String::as_str)
@@ -178,9 +236,12 @@ fn main() {
             let cube = cube_path_for(&author);
             let mut w = Writer::create(&cube).expect("open cube failed");
             w.store_directory(target).expect("store directory failed");
+            println!("Inscribed: {target}");
+            ExitCode::SUCCESS
         }
 
         Some(("seal", sub)) => {
+            assert!(hooks().is_ok(), "source code refused");
             let editor = var(EDITOR).expect("get editor failed");
 
             let ty = if let Some(t) = sub.get_one::<String>("type") {
@@ -256,6 +317,7 @@ fn main() {
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "none".to_string())
             );
+            ExitCode::SUCCESS
         }
 
         Some(("timeline", sub)) => {
@@ -265,7 +327,7 @@ fn main() {
             let commits = read_commits_from_cube(&cube).expect("read commits failed");
             if commits.is_empty() {
                 println!("No commits.");
-                return;
+                return ExitCode::SUCCESS;
             }
             for ev in commits {
                 match serde_json::from_str::<serde_json::Value>(&ev.noumenon) {
@@ -295,15 +357,14 @@ fn main() {
                             }
                             if let Ok(ts_ms) = i64::try_from(ts_ms_i128) {
                                 if let Some(naive) = DateTime::from_timestamp_millis(ts_ms) {
-                                    let utc = DateTime::<Utc>::from(naive);
                                     if show_utc {
                                         if show_iso {
-                                            utc.to_rfc3339()
+                                            naive.to_rfc3339()
                                         } else {
-                                            utc.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                                            naive.format("%Y-%m-%d %H:%M:%S UTC").to_string()
                                         }
                                     } else {
-                                        let local = utc.with_timezone(&chrono::Local);
+                                        let local = naive.with_timezone(&chrono::Local);
                                         if show_iso {
                                             local.to_rfc3339()
                                         } else {
@@ -324,9 +385,11 @@ fn main() {
                     }
                     Err(_) => {
                         println!("#{} [commit] <unparsed>", ev.id);
+                        return ExitCode::FAILURE;
                     }
                 }
             }
+            ExitCode::SUCCESS
         }
 
         Some(("view", _)) => {
@@ -339,21 +402,25 @@ fn main() {
                         let ty = v.get("ty").and_then(|x| x.as_str()).unwrap_or("commit");
                         let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
                         println!("#{id} [{ty}] {summary}");
+                        ExitCode::SUCCESS
                     }
-                    Err(_) => println!("#{} [commit]", ev.id),
+                    Err(_) => {
+                        println!("#{} [commit]", ev.id);
+                        ExitCode::FAILURE
+                    }
                 }
             } else {
                 println!("No commits.");
+                ExitCode::SUCCESS
             }
         }
 
         // Ajout du handler pour la commande diff
-        Some(("diff", _)) => {
-            diff::diff();
-        }
+        Some(("diff", _)) => diff::diff(),
 
         _ => {
             println!("unknown command");
+            ExitCode::FAILURE
         }
     }
 }

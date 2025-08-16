@@ -2,8 +2,9 @@ use colored::Colorize;
 use std::env::{current_dir, var};
 use std::io;
 use std::path::{MAIN_SEPARATOR_STR, Path};
+use std::process::ExitCode;
 
-pub fn diff() {
+pub fn diff() -> ExitCode {
     let repository_root = current_dir().expect("Failed to get current directory");
     let auteur = var("AK_USERNAME").expect("Failed to get auteur");
     let tree_dir = repository_root.join(format!(
@@ -13,7 +14,7 @@ pub fn diff() {
     if !tree_dir.exists() {
         eprintln!("No stored tree found at: {}", tree_dir.to_string_lossy());
         eprintln!("Tip: run a command that creates the tree snapshot first.");
-        return;
+        return ExitCode::FAILURE;
     }
 
     let repo_list = match collect_files(&repository_root) {
@@ -23,7 +24,7 @@ pub fn diff() {
         }
         Err(e) => {
             eprintln!("Failed to enumerate repository files: {e}");
-            return;
+            return ExitCode::FAILURE;
         }
     };
 
@@ -34,7 +35,7 @@ pub fn diff() {
         }
         Err(e) => {
             eprintln!("Failed to enumerate stored tree files: {e}");
-            return;
+            return ExitCode::FAILURE;
         }
     };
 
@@ -107,6 +108,7 @@ pub fn diff() {
             }
         }
     }
+    ExitCode::SUCCESS
 }
 
 fn collect_files(root: &Path) -> io::Result<Vec<String>> {
@@ -123,7 +125,6 @@ fn collect_files(root: &Path) -> io::Result<Vec<String>> {
                 .expect("failed to get file type")
                 .is_file()
         })
-        .into_iter()
         .for_each(|a| {
             let x = a.expect("failed to get file");
             if x.path().is_file() {
