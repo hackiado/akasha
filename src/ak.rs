@@ -9,7 +9,6 @@ use std::path::MAIN_SEPARATOR_STR;
 
 pub mod data;
 pub mod event;
-
 const AK_USERNAME: &str = "AK_USERNAME";
 const AK_EMAIL: &str = "AK_EMAIL";
 const EDITOR: &str = "EDITOR";
