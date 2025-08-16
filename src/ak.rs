@@ -10,6 +10,9 @@ use std::path::MAIN_SEPARATOR_STR;
 
 pub mod data;
 pub mod event;
+use crate::data::diff;
+use crate::data::tree;
+
 const AK_USERNAME: &str = "AK_USERNAME";
 const AK_EMAIL: &str = "AK_EMAIL";
 const EDITOR: &str = "EDITOR";
@@ -96,6 +99,8 @@ fn apps() -> ArgMatches {
                 ),
         )
         .subcommand(Command::new("view").about("show the latest commit"))
+        // Ajout de la commande diff
+        .subcommand(Command::new("diff").about("show changes since the last seal"))
         .get_matches()
 }
 
@@ -149,21 +154,20 @@ fn main() {
             // - .eikyu/
             //   - cubes/<YYYY-MM>/<author>.cube
             //   - branches/ (reserved)
-            //   - tree/<author> (reserved)
+            //   - tree/<author>
             create_dir_all("./.eikyu").expect("create dir failed");
             create_dir_all(format!(".eikyu{MAIN_SEPARATOR_STR}cubes"))
                 .expect("create cubes dir failed");
             create_dir_all(format!(".eikyu{MAIN_SEPARATOR_STR}branches"))
                 .expect("create branches dir failed");
-            create_dir_all(format!(
-                ".eikyu{MAIN_SEPARATOR_STR}tree{MAIN_SEPARATOR_STR}{author}"
-            ))
-            .expect("create tree dir failed");
+            let tree_path = format!(".eikyu{MAIN_SEPARATOR_STR}tree{MAIN_SEPARATOR_STR}{author}");
+            create_dir_all(&tree_path).expect("create tree dir failed");
 
             // Ensure the current cube file exists
             let cube = cube_path_for(&author);
             let _ = Writer::create(&cube).expect("failed to initialize cube");
             println!("Initialized repository. Cube: {}", cube);
+            println!("Reference tree: {}", tree_path);
         }
 
         Some(("inscribe", sub)) => {
@@ -206,7 +210,6 @@ fn main() {
                     .expect("body prompt failed")
             };
 
-            // Human friendly commit message (for users/tools that want it)
             let commit_message = COMMIT_TEMPLATE
                 .replace("%type%", &ty)
                 .replace("%summary%", &summary)
@@ -215,24 +218,14 @@ fn main() {
                 .replace("%author_email%", &author_email);
 
             let cube = cube_path_for(&author);
-
-            // Compute parent id (if any)
             let parent = last_commit_id(&cube).expect("read last commit failed");
 
-            // Reserve next id by doing a dry append? We want to store JSON including the id.
-            // Approach: append once to get assigned id, then rewrite is not supported.
-            // Instead, write with phenomenon "commit:pending" to get an id, then store final "commit".
-            // Simpler approach: store commit with phenomenon "commit" and then immediately read the last id.
-            // We'll append once and then fetch last id to include in the JSON we store as noumenon.
-
-            // Append a placeholder to acquire the id
             let placeholder_off = save_string_in_cube(&cube, "commit:pending", &commit_message)
                 .expect("failed to reserve commit id");
             let pending_event =
                 Writer::read_one_at(&cube, placeholder_off).expect("failed to read back pending");
             let assigned_id = pending_event.id;
 
-            // Build canonical JSON for the commit
             let record = CommitRecord {
                 id: assigned_id,
                 parent,
@@ -241,16 +234,21 @@ fn main() {
                 body: &body,
                 author: &author,
                 author_email: &author_email,
-                // Store milliseconds (not nanoseconds) to keep size reasonable and formatting simple
                 timestamp: u64::try_from(pending_event.timestamp / 1_000_000).unwrap_or(0),
             };
             let json = serde_json::to_string_pretty(&record).expect("serialize commit failed");
 
-            // Store the official commit record
             save_string_in_cube(&cube, "commit", &json).expect("failed to save commit record");
 
+            // --- MISE À JOUR DE L'ARBRE APRÈS LE COMMIT ---
+            match tree::update_tree(&author) {
+                Ok(_) => println!("Reference tree updated successfully."),
+                Err(e) => eprintln!("Error updating reference tree: {}", e),
+            }
+            // --- FIN DE LA MISE À JOUR ---
+
             println!(
-                "{} {} (id={} parent={})",
+                "Sealed: {} {} (id={} parent={})",
                 ty,
                 summary,
                 assigned_id,
@@ -270,11 +268,9 @@ fn main() {
                 return;
             }
             for ev in commits {
-                // noumenon is JSON CommitRecord
                 match serde_json::from_str::<serde_json::Value>(&ev.noumenon) {
                     Ok(v) => {
                         let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(ev.id);
-                        // timestamp peut être un nombre ou une chaîne (anciens commits)
                         let ts_raw_u128: Option<u128> = match v.get("timestamp") {
                             Some(serde_json::Value::Number(n)) => n.as_u64().map(|u| u as u128),
                             Some(serde_json::Value::String(s)) => s.parse::<u128>().ok(),
@@ -293,10 +289,9 @@ fn main() {
                             .to_string();
 
                         let when = if let Some(ts_raw) = ts_raw_u128 {
-                            // Heuristique: si > 1e15 => probablement nanosecondes, convertir en millisecondes
                             let mut ts_ms_i128: i128 = ts_raw as i128;
                             if ts_ms_i128 > 1_000_000_000_000_000_i128 {
-                                ts_ms_i128 /= 1_000_000; // ns -> ms
+                                ts_ms_i128 /= 1_000_000;
                             }
                             if let Ok(ts_ms) = i64::try_from(ts_ms_i128) {
                                 if let Some(naive) = DateTime::from_timestamp_millis(ts_ms) {
@@ -350,6 +345,11 @@ fn main() {
             } else {
                 println!("No commits.");
             }
+        }
+
+        // Ajout du handler pour la commande diff
+        Some(("diff", _)) => {
+            diff::diff();
         }
 
         _ => {

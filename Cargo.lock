@@ -102,9 +102,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.9.1"
+version = "2.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
+checksum = "6a65b545ab31d687cff52899d4890855fec459eb6afe0da6417b8a18da87aa29"
 
 [[package]]
 name = "blake3"
@@ -202,6 +202,15 @@ name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
+
+[[package]]
+name = "colored"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fde0e0ec90c9dfb3b4b1a0891a7dcd0e2bffde2f7efed5fe7c9bb00e5bfb915e"
+dependencies = [
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "console"
@@ -319,16 +328,14 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "colored",
  "crc32fast",
  "diff",
- "glob",
  "ignore",
  "indicatif",
  "inquire",
  "serde",
  "serde_json",
- "tempfile",
- "tmpfile",
 ]
 
 [[package]]
@@ -382,12 +389,6 @@ dependencies = [
  "r-efi",
  "wasi 0.14.2+wasi-0.2.4",
 ]
-
-[[package]]
-name = "glob"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "globset"
@@ -461,7 +462,7 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fddf93031af70e75410a2511ec04d49e758ed2f26dad3404a934e0fb45cc12a"
 dependencies = [
- "bitflags 2.9.1",
+ "bitflags 2.9.2",
  "chrono",
  "console 0.15.11",
  "crossterm",
@@ -632,7 +633,7 @@ version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5407465600fb0548f1442edf71dd20683c6ed326200ace4b1ef0763521bb3b77"
 dependencies = [
- "bitflags 2.9.1",
+ "bitflags 2.9.2",
 ]
 
 [[package]]
@@ -658,7 +659,7 @@ version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11181fbabf243db407ef8df94a6ce0b2f9a733bd8be4ad02b4eda9602296cac8"
 dependencies = [
- "bitflags 2.9.1",
+ "bitflags 2.9.2",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -804,12 +805,6 @@ checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
 ]
-
-[[package]]
-name = "tmpfile"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70792bb5e9b3c542ef963da937f81eb674d90e1952d9f18ddb21dbaa46b78aee"
 
 [[package]]
 name = "unicode-ident"
@@ -1249,5 +1244,5 @@ version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f42320e61fe2cfd34354ecb597f86f413484a798ba44a8ca1165c58d42da6c1"
 dependencies = [
- "bitflags 2.9.1",
+ "bitflags 2.9.2",
 ]
