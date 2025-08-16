@@ -156,7 +156,6 @@ fn main() {
                 writer
                     .store_directory(Path::new(name))
                     .expect("failed to save the directory to the cube");
-
             }
             Some((cmd, _)) => {
                 println!("save subcommand: {cmd}");
