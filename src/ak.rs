@@ -6,7 +6,7 @@ use inquire::{Editor, Select, Text};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env::var;
-use std::fs::create_dir_all;
+use std::fs::{create_dir_all, read_to_string};
 use std::io::Error;
 use std::path::{MAIN_SEPARATOR_STR, Path};
 use std::process::ExitCode;
@@ -187,14 +187,77 @@ fn last_commit_id(cube_path: &str) -> std::io::Result<Option<u64>> {
     Ok(commits.last().map(|e| e.id))
 }
 
+pub fn cargo_project_hook() -> Result<(), Error> {
+    println!("cargo project detected");
+    PreCommit::new()
+        .add_task("fmt", "cargo", "fmt --check")
+        .add_task("test", "cargo", "test --no-fail-fast")
+        .add_task("lint", "cargo", "clippy -- -D clippy::all")
+        .run()
+}
+
+pub fn npm_project_hook() -> Result<(), Error> {
+    println!("npm project detected");
+
+    // Detect package manager
+    let (pm_prog, run_args_for): (&str, fn(&str) -> String) =
+        if Path::new("pnpm-lock.yaml").exists() {
+            ("pnpm", |script: &str| format!("run -s {script}"))
+        } else if Path::new("yarn.lock").exists() {
+            // yarn v1: `yarn <script>`
+            ("yarn", |script: &str| script.to_string())
+        } else {
+            // default to npm
+            ("npm", |script: &str| format!("run -s {script}"))
+        };
+
+    // Parse package.json to discover available scripts
+    let mut available: HashMap<String, String> = HashMap::new();
+
+    if let Some(serde_json::Value::Object(obj)) = read_to_string("package.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("scripts").cloned())
+    {
+        for (k, v) in obj {
+            if let Some(cmd) = v.as_str() {
+                available.insert(k, cmd.to_string());
+            }
+        }
+    }
+
+    // Build pre-commit pipeline from discovered scripts
+    let mut pc = PreCommit::new();
+
+    // format/fmt
+    if available.contains_key("format") {
+        pc.add_task("format", pm_prog, &run_args_for("format"));
+    } else if available.contains_key("fmt") {
+        pc.add_task("fmt", pm_prog, &run_args_for("fmt"));
+    }
+
+    // lint
+    if available.contains_key("lint") {
+        pc.add_task("lint", pm_prog, &run_args_for("lint"));
+    }
+
+    // test (present by défaut chez npm, mais on vérifie quand même)
+    if available.contains_key("test") || Path::new("package.json").exists() {
+        pc.add_task("test", pm_prog, &run_args_for("test"));
+    }
+
+    // If nothing was detected, at least try tests to gate commits
+    if pc.tasks.is_empty() {
+        pc.add_task("test", pm_prog, &run_args_for("test"));
+    }
+
+    pc.run()
+}
 fn hooks() -> Result<(), Error> {
     if Path::new("Cargo.toml").exists() {
-        println!("cargo project detected");
-        PreCommit::new()
-            .add_task("fmt", "cargo", "fmt --check")
-            .add_task("test", "cargo", "test --no-fail-fast")
-            .add_task("lint", "cargo", "clippy -- -D clippy::all")
-            .run()
+        cargo_project_hook()
+    } else if Path::new("package.json").exists() {
+        npm_project_hook()
     } else {
         Ok(())
     }
