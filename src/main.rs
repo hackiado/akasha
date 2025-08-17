@@ -1,19 +1,16 @@
+use crate::data::write::{self, Writer};
+use clap::{Arg, ArgMatches, Command};
+use std::path::Path;
+
+// ... existing code ...
 pub mod data;
 pub mod event;
 
-use crate::data::write::Writer;
-use clap::{Arg, ArgMatches, Command};
-use std::fs::File;
-use std::path::Path;
-
-pub fn echo(s: &str) {
-    println!("\n{s}\n");
-}
 fn cli() -> ArgMatches {
-    Command::new("eikyu")
-        .about("A CLI for the eikyu Living Wisdom System")
+    Command::new("akasha")
+        .about("A CLI for the Akasha Living Wisdom System")
         .version("0.1.0")
-        .author("hackiado <seidogitan@gmail.com>")
+        .author("hackiado <seidogitan@example.com>")
         .subcommand(
             Command::new("save")
                 .about("Probe semantic hyperspace with a query")
@@ -68,7 +65,7 @@ fn cli() -> ArgMatches {
                     Command::new("read")
                         .about("Read information inside a cube")
                         .arg(
-                            Arg::new("name")
+                            clap::Arg::new("name")
                                 .help("Name of the cube")
                                 .required(true)
                                 .value_parser(clap::builder::NonEmptyStringValueParser::new()),
@@ -87,7 +84,6 @@ fn cli() -> ArgMatches {
         )
         .get_matches()
 }
-
 fn main() {
     let app = cli();
 
@@ -99,6 +95,7 @@ fn main() {
                     .get_one::<String>("name")
                     .expect("name is required");
                 println!("Creating cube: {name}");
+                // Initialize or open cube without truncation; ensures header is present.
                 Writer::create(name.as_str()).expect("failed to create cube");
                 println!("Cube created successfully.");
             }
@@ -108,10 +105,11 @@ fn main() {
                         .get_one::<String>("name")
                         .expect("name is required");
                     println!("\nReading cube: {name}\n");
-                    Writer::new(File::open(Path::new(name)).expect("failed to open cube file"))
-                        .read_all()
-                        .expect("failed to read cube file");
-                    echo("Cube reading successfully.");
+                    // Use helper to get a reader-capable Writer and print all records.
+                    let mut reader =
+                        write::read_cube(name.as_str()).expect("failed to open cube file");
+                    reader.read_all().expect("failed to read cube file");
+                    println!("Cube reading successfully.");
                 } else {
                     println!("Cube not exists.");
                 }
@@ -134,8 +132,9 @@ fn main() {
                     .expect("if is required");
                 println!("Saving filename {name} to the {cube} cube");
 
-                // Use Writer::create to append without truncating and keep header/id state
-                let mut writer = Writer::create(cube.as_str()).expect("failed to open/create cube");
+                // Open or create cube in append-safe mode.
+                let mut writer =
+                    write::open_cube(cube.as_str()).expect("failed to open/create cube");
                 writer
                     .store_directory(name)
                     .expect("failed to save the directory content to the cube");

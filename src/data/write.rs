@@ -1,51 +1,99 @@
+//! Append-only event log writer/reader with a fixed binary format and CRC protection.
+//!
+//! File layout:
+//! - Header (16 bytes total):
+//!   - MAGIC       [0..4)   = b"AKLA"
+//!   - VERSION     [4..6)   = u16 (LE), current = 1
+//!   - RESERVED    [6..16)  = 10 bytes
+//!     - NEXT_ID   [6..14)  = u64 (LE), next id to assign for new entries
+//!     - reserved  [14..16) = 2 bytes, currently zero
+//!
+//! - Records (variable length), each:
+//!   - LEN_TOTAL   [0..4)           = u32 (LE), total bytes of (payload + CRC), not including this length field
+//!   - PAYLOAD     [4..4+N)         = see below
+//!   - CRC32       [4+N..4+N+4)     = CRC32 over PAYLOAD (crc32fast)
+//!
+//! PAYLOAD layout:
+//!   - TS          [0..16)          = u128 (LE), UNIX epoch time in nanoseconds
+//!   - ID          [16..24)         = u64 (LE), monotonically increasing id
+//!   - PH_LEN      [24..26)         = u16 (LE), length of phenomenon bytes
+//!   - NO_LEN      [26..28)         = u16 (LE), length of noumenon bytes
+//!   - PHENOMENON  [28..28+PH_LEN)  = UTF-8 bytes
+//!   - NOUMENON    [..+NO_LEN)      = UTF-8 bytes
+//!
+//! Design notes:
+//! - Append-only: records are only appended; we never rewrite existing records except for updating NEXT_ID in header.
+//! - Crash safety: each append is followed by `sync_data()`. Header’s NEXT_ID is also persisted after each append.
+//! - Integrity: each record protected by CRC32; on read, iteration stops at first invalid/truncated record.
+//! - Recovery: if NEXT_ID in header is zero or invalid, we scan the file to compute max(id)+1.
+//! - Deduplication in `store_directory`: based on BLAKE3 hash of file contents tracked per path.
+//! - Concurrency: this struct is not synchronized. External synchronization is required for multi-writer scenarios.
+//!
+//! Endianness: All integers are encoded little-endian.
+
 use crate::event::Event;
+use blake3;
 use crc32fast::Hasher;
 use std::collections::HashMap;
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
 use std::{
     collections::BTreeMap,
-    fs,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Append-only log writer/reader for a single “cube” file.
+///
+/// Responsibilities:
+/// - Initialize/validate the on-disk header and maintain a monotonic `next_id`.
+/// - Append CRC-protected records with timestamp, id, phenomenon, and noumenon.
+/// - Iterate, index, and random-access read validated records.
 pub struct Writer {
+    /// Underlying file handle for the cube.
     f: File,
+    /// Next record id to assign; persisted in the header for recovery.
     next_id: u64,
 }
 
 impl Writer {
+    /// 4-byte magic to identify the file type.
     const MAGIC: [u8; 4] = *b"AKLA";
+    /// On-disk version. Bump on breaking layout changes.
     const VERSION: u16 = 1;
+    /// Number of reserved header bytes after MAGIC+VERSION.
     const HEADER_RESERVED: usize = 10;
+    /// Total header length in bytes.
     const HEADER_LEN: u64 = 16;
 
     // Reserved header layout:
     // [0..8): next_id (u64, LE)
     // [8..10): reserved
+    /// Offset of `next_id` field from start-of-file.
     const HDR_NEXT_ID_OFF: u64 = 4 + 2; // MAGIC(4) + VERSION(2) = 6
 
+    /// Construct a Writer from an already-open file.
+    ///
+    /// Note: This does not validate the header or position the cursor. Prefer `create()` unless you
+    /// have special needs.
     pub fn new(f: File) -> Self {
         Self { f, next_id: 1 }
     }
 
-    pub fn append_file<P: AsRef<Path>>(&mut self, filepath: P) -> io::Result<()> {
-        // Store the full path so we can rebuild an accurate seen index later
-        let name = filepath.as_ref().to_string_lossy().to_string();
-
-        let content = read_to_string(&filepath)?;
-
-        self.append(&name, &content)?;
-
-        Ok(())
-    }
-
+    /// Open or create a cube file at `path`, validate/initialize its header, and seek to EOF for appends.
+    ///
+    /// Behavior:
+    /// - New or empty file: write a fresh header with `next_id = 1`.
+    /// - Existing file:
+    ///   - Validate header magic.
+    ///   - Read `next_id`.
+    ///   - If `next_id` is 0, scan the file to recover `max(id) + 1` and persist it.
+    /// - Always leaves the cursor at end-of-file ready for append.
     pub fn create(path: &str) -> io::Result<Self> {
         let mut f = OpenOptions::new()
             .create(true)
-            .truncate(false) // don't truncate existing; make it safe to reopen
+            .truncate(false) // preserve existing data
             .read(true)
             .write(true)
             .open(path)?;
@@ -72,62 +120,40 @@ impl Writer {
         Ok(Self { f, next_id })
     }
 
-    // Build a map of path -> last known content hash from the log
-    fn rebuild_seen_index_from_log(&mut self) -> HashMap<PathBuf, String> {
-        let mut seen = HashMap::new();
-
-        // Save the current position and scan from the beginning
-        let saved_pos = self.f.stream_position().ok();
-        if Self::read_and_validate_header(&mut self.f).is_err() {
-            // If header invalid, return empty (safe fallback)
-            if let Some(pos) = saved_pos {
-                let _ = self.f.seek(SeekFrom::Start(pos));
-            }
-            return seen;
-        }
-        if self.f.seek(SeekFrom::Start(Self::HEADER_LEN)).is_err() {
-            if let Some(pos) = saved_pos {
-                let _ = self.f.seek(SeekFrom::Start(pos));
-            }
-            return seen;
-        }
-
-        // Iterate all valid entries; the last one for a given path wins
-        while let Ok(Some((_len, payload))) = Self::read_valid_entry(&mut self.f) {
-            if let Ok(Some((_ts, _id, ph, no))) = Self::parse_payload(&payload) {
-                // Hash the stored content to compare against filesystem later
-                let hash = blake3::hash(no.as_bytes()).to_hex().to_string();
-                seen.insert(PathBuf::from(ph), hash);
-            }
-        }
-
-        // Restore previous position
-        if let Some(pos) = saved_pos {
-            let _ = self.f.seek(SeekFrom::Start(pos));
-        }
-        seen
-    }
-
-    fn file_hash<P: AsRef<Path>>(&mut self, p: P) -> io::Result<String> {
-        let bytes = fs::read(p)?;
-        Ok(blake3::hash(&bytes).to_hex().to_string())
-    }
-
+    /// Recursively scan `dir` and append contents of qualifying files to the cube,
+    /// deduplicating by content hash and showing a progress bar.
+    ///
+    /// Pipeline:
+    /// - Build in-memory “seen” map from the log: path -> last stored BLAKE3(content).
+    /// - Walk `dir` using ignore rules (.ignore), select only regular files, exclude dotfiles,
+    ///   and exclude paths containing `target` or `.git`.
+    /// - For each file:
+    ///   - Compute BLAKE3(content); if equal to the last stored hash for that path, skip.
+    ///   - Otherwise, append file content under its path and update the in-memory map.
+    ///
+    /// Error handling:
+    /// - Per-file failures (hash/read/append) are logged to stderr and processing continues.
+    /// - Overall function returns `Ok(())` unless a fatal IO error occurs setting up the walk or I/O on the cube.
     pub fn store_directory<P: AsRef<Path>>(&mut self, dir: P) -> io::Result<()> {
+        // Build a map of path -> last stored content hash by scanning the cube.
         let mut seen: HashMap<PathBuf, String> = self.rebuild_seen_index_from_log();
 
-        // Collect files
+        // Collect candidate files from the directory walk applying the exclusion policy.
         let mut files: Vec<PathBuf> = ignore::WalkBuilder::new(dir)
             .add_custom_ignore_filename(".ignore")
             .build()
             .filter_map(Result::ok)
             .filter(|e| {
+                // Keep only regular files; skip directories and special file types.
                 e.file_type()
                     .expect("failed to get the file type")
                     .is_file()
             })
             .map(|e| e.into_path())
             .filter(|p| {
+                // Exclusions:
+                // - dotfiles
+                // - any path containing "target" or ".git" components
                 let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if name.starts_with('.') {
                     return false;
@@ -141,9 +167,10 @@ impl Writer {
             })
             .collect();
 
-        files.sort(); // stable order
+        // Sort for stable, reproducible traversal order.
+        files.sort();
 
-        // progress bar (indicatif)
+        // Progress bar setup.
         use indicatif::{ProgressBar, ProgressStyle};
         let pb = ProgressBar::new(files.len() as u64);
         pb.set_style(
@@ -154,24 +181,28 @@ impl Writer {
         );
 
         for path in files {
-            let h = match self.file_hash(&path) {
+            // Compute the current file's content hash.
+            let h = match Self::file_hash(&path) {
                 Ok(h) => h,
                 Err(e) => {
+                    // Log and continue on non-fatal per-file errors.
                     eprintln!("hash fail {}: {e}", path.display());
                     pb.inc(1);
                     continue;
                 }
             };
 
+            // Display the current filename in the progress bar.
             pb.set_message(format!("{}", path.file_name().unwrap().to_string_lossy()));
 
-            // Dedup: if the last stored content hash is the same, skip
+            // Deduplicate: skip if unchanged relative to last stored content for this path.
             let is_same = seen.get(&path).map(|old| old == &h).unwrap_or(false);
             if !is_same {
-                if let Err(e) = self.append_file(&path) {
+                // Append file contents to the cube; log error but do not abort on failure.
+                if let Err(e) = self.append_file_contents(&path) {
                     eprintln!("store fail {}: {e}", path.display());
                 } else {
-                    // Update seen with the new content hash
+                    // Update the in-memory "seen" index so subsequent duplicates in this run are skipped.
                     seen.insert(path.clone(), h);
                 }
             }
@@ -183,6 +214,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Write a fresh header with the provided `next_id` at offset 0 and flush it.
     fn write_header(f: &mut File, next_id: u64) -> io::Result<()> {
         f.seek(SeekFrom::Start(0))?;
         f.write_all(Self::MAGIC.as_ref())?;
@@ -196,6 +228,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Persist `next_id` into the header while preserving the current cursor position.
     fn write_header_next_id(f: &mut File, next_id: u64) -> io::Result<()> {
         let cur = f.stream_position()?;
         f.seek(SeekFrom::Start(Self::HDR_NEXT_ID_OFF))?;
@@ -206,6 +239,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Read `next_id` from the header, restoring the original cursor position afterwards.
     fn read_header_next_id(f: &mut File) -> io::Result<u64> {
         let cur = f.stream_position()?;
         f.seek(SeekFrom::Start(Self::HDR_NEXT_ID_OFF))?;
@@ -216,6 +250,9 @@ impl Writer {
         Ok(val)
     }
 
+    /// Validate the header by checking the magic value at the start of the file.
+    ///
+    /// On success, the cursor is left just after the 16-byte header.
     fn read_and_validate_header(f: &mut File) -> io::Result<()> {
         // Ensure we read header from the beginning
         f.seek(SeekFrom::Start(0))?;
@@ -227,6 +264,9 @@ impl Writer {
         Ok(())
     }
 
+    /// Scan the file and return the maximum encountered record id, if any.
+    ///
+    /// Used for recovery when the stored `next_id` is zero/invalid.
     fn compute_max_id_from_file(f: &mut File) -> io::Result<Option<u64>> {
         // Start right after header
         Self::read_and_validate_header(f)?;
@@ -242,6 +282,12 @@ impl Writer {
         Ok(max_id)
     }
 
+    /// Append a new record with the given phenomenon and noumenon, returning its byte offset.
+    ///
+    /// Guarantees:
+    /// - Appends at EOF.
+    /// - Flushes data to disk (`sync_data`) for crash safety.
+    /// - Increments and persists `next_id` in the header.
     pub fn append(&mut self, phenomenon: &str, noumenon: &str) -> io::Result<u64> {
         // ensure we are at the end
         let start = self.f.seek(SeekFrom::End(0))?;
@@ -290,6 +336,9 @@ impl Writer {
         Ok(start) // offset useful for external indexing
     }
 
+    /// Iterate over the file and print all valid records in a human-readable form.
+    ///
+    /// Stops on the first invalid/truncated record (typical for append-only logs with partial tails).
     pub fn read_all(&mut self) -> io::Result<()> {
         Self::read_and_validate_header(&mut self.f)?;
         self.f.seek(SeekFrom::Start(Self::HEADER_LEN))?;
@@ -304,6 +353,9 @@ impl Writer {
         Ok(())
     }
 
+    /// Build an index of id -> file offset for all valid records.
+    ///
+    /// If duplicate ids are present (unexpected), the last one wins.
     pub fn rebuild_index(&mut self) -> io::Result<BTreeMap<u64, u64>> {
         let mut idx = BTreeMap::new();
         Self::read_and_validate_header(&mut self.f)?;
@@ -323,6 +375,12 @@ impl Writer {
         Ok(idx)
     }
 
+    /// Read the next record from the current cursor, verify CRC, and return its (len, payload).
+    ///
+    /// Returns:
+    /// - `Ok(Some((len, payload)))` for a valid record
+    /// - `Ok(None)` on EOF, partial tail, invalid length, truncated entry, or CRC mismatch
+    /// - `Err(_)` on underlying IO errors during reads
     fn read_valid_entry(f: &mut File) -> io::Result<Option<(usize, Vec<u8>)>> {
         let mut len_buf = [0u8; 4];
         let n = f.read(&mut len_buf)?;
@@ -363,6 +421,52 @@ impl Writer {
         Ok(Some((len, payload.to_vec())))
     }
 
+    /// Build an in-memory map of path -> last known content hash by scanning the log.
+    ///
+    /// The content hash is computed as BLAKE3 over the noumenon bytes of the last valid record
+    /// for each path (phenomenon). This supports deduplication in `store_directory`.
+    fn rebuild_seen_index_from_log(&mut self) -> HashMap<PathBuf, String> {
+        let mut seen = HashMap::new();
+
+        // Validate header and position after it; return empty on failure for safety.
+        if Self::read_and_validate_header(&mut self.f).is_err() {
+            return seen;
+        }
+        if self.f.seek(SeekFrom::Start(Self::HEADER_LEN)).is_err() {
+            return seen;
+        }
+
+        // Scan all valid entries; the last one for a given path wins.
+        while let Ok(Some((_, payload))) = Self::read_valid_entry(&mut self.f) {
+            if let Ok(Some((_ts, _id, ph, no))) = Self::parse_payload(&payload) {
+                let hash = blake3::hash(no.as_bytes()).to_hex().to_string();
+                seen.insert(PathBuf::from(ph), hash);
+            }
+        }
+
+        seen
+    }
+
+    /// Read a file and append its contents to the log.
+    ///
+    /// The file path is stored as the phenomenon, and its contents as the noumenon.
+    fn append_file_contents(&mut self, path: &Path) -> io::Result<u64> {
+        let content = read_to_string(path)?;
+        self.append(&path.display().to_string(), &content)
+    }
+
+    /// Compute a BLAKE3 hash of a file's raw bytes, returned as a lowercase hex string.
+    ///
+    /// This function reads bytes (not text) so it works for both text and binary files.
+    fn file_hash(path: &Path) -> io::Result<String> {
+        let bytes = fs::read(path)?;
+        let hash = blake3::hash(&bytes);
+        Ok(hash.to_hex().to_string())
+    }
+
+    /// Parse a payload into (timestamp, id, phenomenon, noumenon), validating bounds and UTF-8.
+    ///
+    /// Returns `Ok(Some(..))` on success, `Ok(None)` on malformed payload.
     fn parse_payload(payload: &[u8]) -> io::Result<Option<(u128, u64, String, String)>> {
         let mut p = 0usize;
 
@@ -405,6 +509,7 @@ impl Writer {
         Ok(Some((ts, id, ph, no)))
     }
 
+    /// Random-access read of a record at `offset` in `path`, verifying CRC and returning an `Event`.
     pub fn read_one_at<P: AsRef<Path>>(path: P, offset: u64) -> io::Result<Event> {
         let mut f = File::open(path)?;
         f.seek(SeekFrom::Start(offset))?;
@@ -446,4 +551,21 @@ impl Writer {
             noumenon: no.to_string(),
         })
     }
+}
+
+// Free helper functions for CLI ergonomics.
+
+// Open an existing cube or create one if missing, returning a Writer positioned at EOF.
+//
+// This is a thin wrapper around Writer::create used by the CLI layer.
+pub fn open_cube(path: &str) -> io::Result<Writer> {
+    Writer::create(path)
+}
+
+// Open a cube for reading/printing using the Writer API.
+//
+// This currently reuses Writer::create to validate the header and position the cursor;
+// the returned Writer can be used to call `read_all`.
+pub fn read_cube(path: &str) -> io::Result<Writer> {
+    Writer::create(path)
 }

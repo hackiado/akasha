@@ -20,6 +20,17 @@ const AK_USERNAME: &str = "AK_USERNAME";
 const AK_EMAIL: &str = "AK_EMAIL";
 const EDITOR: &str = "EDITOR";
 
+/// Template for interactive commit messages.
+///
+/// Placeholders:
+/// - %type%
+/// - %summary%
+/// - %body%
+/// - %author%
+/// - %author_email%
+///
+/// The rendered message is stored as an intermediate "commit:pending" event to
+/// reserve and discover the final monotonically-increasing commit id.
 const COMMIT_TEMPLATE: &str = r#"%type% %summary%
 
 %body%
@@ -28,48 +39,69 @@ const COMMIT_TEMPLATE: &str = r#"%type% %summary%
 
 "#;
 
+/// Simple pre-commit pipeline orchestrator.
+///
+/// - Each task is a tuple (program, args) grouped under a logical name.
+/// - Tasks are executed in insertion order in the current working directory.
+/// - If any task fails (non-zero exit code), execution stops and an error is returned.
+/// - This is intentionally minimal and local-only.
 #[derive(Default)]
 pub struct PreCommit {
     pub tasks: HashMap<String, HashMap<String, String>>,
 }
 
 impl PreCommit {
+    /// Construct an empty pipeline.
     pub fn new() -> Self {
         Self {
             tasks: HashMap::new(),
         }
     }
+
+    /// Add a task to the pipeline.
+    ///
+    /// - task: human-readable step name (e.g., "fmt", "test")
+    /// - program: executable to run (e.g., "cargo", "npm")
+    /// - args: argument string split by whitespace (e.g., "fmt --check")
     pub fn add_task(&mut self, task: &str, program: &str, args: &str) -> &mut Self {
         let mut x = HashMap::new();
         x.insert(program.to_string(), args.to_string());
         self.tasks.insert(task.to_string(), x);
         self
     }
+
+    /// Execute all tasks in sequence.
+    ///
+    /// Returns:
+    /// - Ok(()) if all tasks succeed
+    /// - Err(Error) on the first failure
     pub fn run(&self) -> Result<(), Error> {
-        for (name, p) in self.tasks.iter() {
-            for (program, args) in p {
-                if std::process::Command::new(program)
+        for (name, programs) in self.tasks.iter() {
+            for (program, args) in programs {
+                // Spawn the process and wait synchronously for completion.
+                let status = std::process::Command::new(program)
                     .args(args.split_whitespace())
                     .current_dir(".")
-                    .spawn()
-                    .expect("")
-                    .wait()
-                    .expect("")
-                    .success()
-                    .eq(&false)
-                {
-                    println!(">> step {name} failed");
-                    return Err(Error::other("test failed"));
-                } else {
-                    println!(">> step {name} passed");
-                    continue;
+                    .status()
+                    .map_err(|e| Error::other(format!("failed to spawn '{program}': {e}")))?;
+
+                if !status.success() {
+                    println!(">> step {name} failed (status: {status})");
+                    return Err(Error::other(format!(
+                        "pre-commit step '{name}' failed with status {status}"
+                    )));
                 }
+
+                println!(">> step {name} passed");
             }
         }
         Ok(())
     }
 }
-// Commit object stored as phenomenon "commit" with noumenon = JSON
+
+/// Wire-format of a commit event stored as phenomenon "commit" with a JSON noumenon.
+///
+/// This is the durable record extracted from the intermediate "commit:pending" reservation.
 #[derive(Serialize)]
 struct CommitRecord<'a> {
     id: u64,
@@ -79,9 +111,13 @@ struct CommitRecord<'a> {
     body: &'a str,
     author: &'a str,
     author_email: &'a str,
+    /// Milliseconds since Unix epoch (UTC).
     timestamp: u64,
 }
 
+/// Define the CLI for the local VCS and parse arguments.
+///
+/// This is side-effect free and only sets up subcommands and flags.
 fn apps() -> ArgMatches {
     Command::new("ak")
         .about("a new vcs")
@@ -143,31 +179,37 @@ fn apps() -> ArgMatches {
                 ),
         )
         .subcommand(Command::new("view").about("show the latest commit"))
-        // Ajout de la commande diff
         .subcommand(Command::new("diff").about("show changes since the last seal"))
         .get_matches()
 }
 
-// Resolve cube path for the current author by year-month granularity
+/// Compute the current author's cube file path with year-month bucketing.
+///
+/// Layout:
+/// - .eikyu/cubes/YYYY-MM/<author>.cube
 fn cube_path_for(author: &str) -> String {
     let ym = chrono::Local::now().format("%Y-%m").to_string();
     create_dir_all(format!(
         ".eikyu{MAIN_SEPARATOR_STR}cubes{MAIN_SEPARATOR_STR}{ym}"
     ))
-    .expect("create cubes dir failed");
+        .expect("create cubes dir failed");
     format!(
         ".eikyu{MAIN_SEPARATOR_STR}cubes{MAIN_SEPARATOR_STR}{ym}{MAIN_SEPARATOR_STR}{author}.cube"
     )
 }
 
-// Save a string directly into a cube file under a given "phenomenon" label.
+/// Append a phenomenon/noumenon string pair into the target cube.
+///
+/// Returns the byte offset of the appended record (useful for random access).
 fn save_string_in_cube(cube_path: &str, phenomenon: &str, content: &str) -> std::io::Result<u64> {
     let mut w = Writer::create(cube_path)?;
     let off = w.append(phenomenon, content)?;
     Ok(off)
 }
 
-// Read all events (commits) from a cube and return them in order of id.
+/// Read all events from a cube, filter to commits, and return them ordered by id.
+///
+/// The index is rebuilt from the log and used to fetch each event.
 fn read_commits_from_cube(cube_path: &str) -> std::io::Result<Vec<Event>> {
     let mut w = Writer::create(cube_path)?;
     let idx = w.rebuild_index()?; // id -> offset
@@ -181,12 +223,16 @@ fn read_commits_from_cube(cube_path: &str) -> std::io::Result<Vec<Event>> {
     Ok(out)
 }
 
-// Get the last commit id, if any, from the cube.
+/// Return the last commit id present in the cube, if any.
 fn last_commit_id(cube_path: &str) -> std::io::Result<Option<u64>> {
     let commits = read_commits_from_cube(cube_path)?;
     Ok(commits.last().map(|e| e.id))
 }
 
+/// Pre-commit checks for Rust/Cargo projects.
+/// - fmt --check
+/// - test --no-fail-fast
+/// - clippy with warnings as errors
 pub fn cargo_project_hook() -> Result<(), Error> {
     println!("cargo project detected");
     PreCommit::new()
@@ -196,10 +242,14 @@ pub fn cargo_project_hook() -> Result<(), Error> {
         .run()
 }
 
+/// Pre-commit checks for Node.js projects detected via package manager files.
+///
+/// Discovers scripts in package.json and attempts to run a reasonable subset
+/// (format/fmt, lint, test). Defaults to running `test` when nothing is found.
 pub fn npm_project_hook() -> Result<(), Error> {
     println!("npm project detected");
 
-    // Detect package manager
+    // Detect package manager and normalize "run" invocation.
     let (pm_prog, run_args_for): (&str, fn(&str) -> String) =
         if Path::new("pnpm-lock.yaml").exists() {
             ("pnpm", |script: &str| format!("run -s {script}"))
@@ -253,6 +303,10 @@ pub fn npm_project_hook() -> Result<(), Error> {
 
     pc.run()
 }
+
+/// Auto-detect project type and run the appropriate pre-commit hook.
+///
+/// No-op for unrecognized projects.
 fn hooks() -> Result<(), Error> {
     if Path::new("Cargo.toml").exists() {
         cargo_project_hook()
@@ -262,10 +316,25 @@ fn hooks() -> Result<(), Error> {
         Ok(())
     }
 }
+
 fn main() -> ExitCode {
     let args = apps();
-    let author = var(AK_USERNAME).expect("get username failed");
-    let author_email = var(AK_EMAIL).expect("get username email failed");
+
+    // Resolve author identity from the environment. These are required for commit metadata.
+    let author = match var(AK_USERNAME) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Missing {AK_USERNAME}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let author_email = match var(AK_EMAIL) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Missing {AK_EMAIL}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     match args.subcommand() {
         Some(("init", _)) => {
@@ -282,7 +351,7 @@ fn main() -> ExitCode {
             let tree_path = format!(".eikyu{MAIN_SEPARATOR_STR}tree{MAIN_SEPARATOR_STR}{author}");
             create_dir_all(&tree_path).expect("create tree dir failed");
 
-            // Ensure the current cube file exists
+            // Ensure the current cube file exists for this author/month.
             let cube = cube_path_for(&author);
             let _ = Writer::create(&cube).expect("failed to initialize cube");
             println!("Initialized repository. Cube: {cube}");
@@ -291,7 +360,12 @@ fn main() -> ExitCode {
         }
 
         Some(("inscribe", sub)) => {
-            assert!(hooks().is_ok(), ">> !! source code refused !!");
+            // Gate the operation through pre-commit hooks. If hooks fail, abort inscription.
+            if let Err(e) = hooks() {
+                eprintln!("Pre-commit hooks failed: {e}");
+                return ExitCode::FAILURE;
+            }
+
             let target = sub
                 .get_one::<String>("path")
                 .map(String::as_str)
@@ -304,9 +378,22 @@ fn main() -> ExitCode {
         }
 
         Some(("seal", sub)) => {
-            assert!(hooks().is_ok(), "source code refused");
-            let editor = var(EDITOR).expect("get editor failed");
+            // Gate the operation through pre-commit hooks. If hooks fail, abort the commit.
+            if let Err(e) = hooks() {
+                eprintln!("Pre-commit hooks failed: {e}");
+                return ExitCode::FAILURE;
+            }
 
+            // Resolve editor for interactive body capture.
+            let editor = match var(EDITOR) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Missing {EDITOR}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            // Commit type (interactive fallback).
             let ty = if let Some(t) = sub.get_one::<String>("type") {
                 t.to_owned()
             } else {
@@ -317,6 +404,7 @@ fn main() -> ExitCode {
                     .to_string()
             };
 
+            // Commit summary (interactive fallback).
             let summary = if let Some(s) = sub.get_one::<String>("summary") {
                 s.to_owned()
             } else {
@@ -325,6 +413,7 @@ fn main() -> ExitCode {
                     .expect("summary prompt failed")
             };
 
+            // Commit body (interactive editor fallback).
             let body = if let Some(b) = sub.get_one::<String>("body") {
                 b.to_owned()
             } else {
@@ -334,6 +423,7 @@ fn main() -> ExitCode {
                     .expect("body prompt failed")
             };
 
+            // Render the user-facing commit message and reserve an id via a "commit:pending" event.
             let commit_message = COMMIT_TEMPLATE
                 .replace("%type%", &ty)
                 .replace("%summary%", &summary)
@@ -344,12 +434,14 @@ fn main() -> ExitCode {
             let cube = cube_path_for(&author);
             let parent = last_commit_id(&cube).expect("read last commit failed");
 
+            // Reserve an id by appending a pending record, then read it back to obtain the assigned id.
             let placeholder_off = save_string_in_cube(&cube, "commit:pending", &commit_message)
                 .expect("failed to reserve commit id");
             let pending_event =
                 Writer::read_one_at(&cube, placeholder_off).expect("failed to read back pending");
             let assigned_id = pending_event.id;
 
+            // Durable commit record (wire format).
             let record = CommitRecord {
                 id: assigned_id,
                 parent,
@@ -358,18 +450,18 @@ fn main() -> ExitCode {
                 body: &body,
                 author: &author,
                 author_email: &author_email,
+                // Convert internal nanoseconds to milliseconds (bounded).
                 timestamp: u64::try_from(pending_event.timestamp / 1_000_000).unwrap_or(0),
             };
             let json = serde_json::to_string_pretty(&record).expect("serialize commit failed");
 
             save_string_in_cube(&cube, "commit", &json).expect("failed to save commit record");
 
-            // --- MISE À JOUR DE L'ARBRE APRÈS LE COMMIT ---
+            // Refresh the on-disk reference tree to match the sealed state.
             match tree::update_tree(&author) {
                 Ok(_) => println!("Reference tree updated successfully."),
                 Err(e) => eprintln!("Error updating reference tree: {}", e),
             }
-            // --- FIN DE LA MISE À JOUR ---
 
             println!(
                 "Sealed: {} {} (id={} parent={})",
@@ -392,10 +484,14 @@ fn main() -> ExitCode {
                 println!("No commits.");
                 return ExitCode::SUCCESS;
             }
+
             for ev in commits {
+                // Parse the commit JSON payload; tolerate errors by skipping malformed entries.
                 match serde_json::from_str::<serde_json::Value>(&ev.noumenon) {
                     Ok(v) => {
                         let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(ev.id);
+
+                        // Robust timestamp handling: accept number or string; allow ns or ms.
                         let ts_raw_u128: Option<u128> = match v.get("timestamp") {
                             Some(serde_json::Value::Number(n)) => n.as_u64().map(|u| u as u128),
                             Some(serde_json::Value::String(s)) => s.parse::<u128>().ok(),
@@ -413,8 +509,10 @@ fn main() -> ExitCode {
                             .unwrap_or("")
                             .to_string();
 
+                        // Normalize to milliseconds and format according to flags.
                         let when = if let Some(ts_raw) = ts_raw_u128 {
                             let mut ts_ms_i128: i128 = ts_raw as i128;
+                            // Heuristic: treat very large values as nanoseconds and convert to ms.
                             if ts_ms_i128 > 1_000_000_000_000_000_i128 {
                                 ts_ms_i128 /= 1_000_000;
                             }
@@ -446,9 +544,9 @@ fn main() -> ExitCode {
 
                         println!("#{id} [{ty}] {summary} @ {when}");
                     }
-                    Err(_) => {
-                        println!("#{} [commit] <unparsed>", ev.id);
-                        return ExitCode::FAILURE;
+                    Err(e) => {
+                        eprintln!("warning: failed to parse commit #{}, reason: {e}", ev.id);
+                        // Skip malformed entries but keep showing the rest of the timeline.
                     }
                 }
             }
@@ -478,7 +576,7 @@ fn main() -> ExitCode {
             }
         }
 
-        // Ajout du handler pour la commande diff
+        // Show changes between working directory and the last sealed reference tree.
         Some(("diff", _)) => diff::diff(),
 
         _ => {
