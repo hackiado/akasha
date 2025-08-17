@@ -65,7 +65,7 @@ fn cli() -> ArgMatches {
                     Command::new("read")
                         .about("Read information inside a cube")
                         .arg(
-                            clap::Arg::new("name")
+                            Arg::new("name")
                                 .help("Name of the cube")
                                 .required(true)
                                 .value_parser(clap::builder::NonEmptyStringValueParser::new()),
@@ -132,7 +132,7 @@ fn main() {
                     .expect("if is required");
                 println!("Saving filename {name} to the {cube} cube");
 
-                // Open or create cube in append-safe mode.
+                // Open or create the cube in append-safe mode.
                 let mut writer =
                     write::open_cube(cube.as_str()).expect("failed to open/create cube");
                 writer

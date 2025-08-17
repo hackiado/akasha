@@ -192,7 +192,7 @@ fn cube_path_for(author: &str) -> String {
     create_dir_all(format!(
         ".eikyu{MAIN_SEPARATOR_STR}cubes{MAIN_SEPARATOR_STR}{ym}"
     ))
-        .expect("create cubes dir failed");
+    .expect("create cubes dir failed");
     format!(
         ".eikyu{MAIN_SEPARATOR_STR}cubes{MAIN_SEPARATOR_STR}{ym}{MAIN_SEPARATOR_STR}{author}.cube"
     )
