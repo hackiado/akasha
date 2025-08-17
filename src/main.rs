@@ -10,10 +10,10 @@ pub fn echo(s: &str) {
     println!("\n{s}\n");
 }
 fn cli() -> ArgMatches {
-    Command::new("akasha")
-        .about("A CLI for the Akasha Living Wisdom System")
+    Command::new("eikyu")
+        .about("A CLI for the eikyu Living Wisdom System")
         .version("0.1.0")
-        .author("hackiado <seidogitan@example.com>")
+        .author("hackiado <seidogitan@gmail.com>")
         .subcommand(
             Command::new("save")
                 .about("Probe semantic hyperspace with a query")
