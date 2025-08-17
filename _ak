@@ -1,0 +1,57 @@
+#compdef ak
+
+_ak() {
+  local -a subcmds
+  subcmds=(
+    'init:init data'
+    'inscribe:track data from a path into the current cube'
+    'seal:register a commit into the current cube'
+    'timeline:show event timeline (commits)'
+    'view:show the latest commit'
+    'diff:show changes since the last seal'
+  )
+
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    '1:subcommand:->subcmd' \
+    '*::arg:->args' || return
+
+  case $state in
+    subcmd)
+      _describe -t commands 'ak subcommand' subcmds
+      return
+    ;;
+    args)
+      case $words[2] in
+        init|view|diff)
+          _message 'no more arguments'
+        ;;
+        inscribe)
+          if (( CURRENT == 3 )); then
+            _files -/
+          else
+            _message 'no more arguments'
+          fi
+        ;;
+        seal)
+          _arguments -C \
+            '(-t --type)'{-t+,--type=}'[Commit type]:type:(feat fix refactor docs test chore)' \
+            '(-s --summary)'{-s+,--summary=}'[Commit summary]' \
+            '(-b --body)'{-b+,--body=}'[Commit body]'
+        ;;
+        timeline)
+          _arguments -C \
+            '--utc[Display timestamps in UTC instead of local time]' \
+            '--iso[Display timestamps in ISO 8601 format with timezone offset]'
+        ;;
+        *)
+          _message 'unknown subcommand'
+        ;;
+      esac
+    ;;
+  esac
+}
+
+compdef _ak ak
