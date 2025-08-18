@@ -16,9 +16,9 @@ pub mod event;
 use crate::data::diff;
 use crate::data::tree;
 
-const AK_USERNAME: &str = "AK_USERNAME";
-const AK_EMAIL: &str = "AK_EMAIL";
-const EDITOR: &str = "EDITOR";
+pub const AK_USERNAME: &str = "AK_USERNAME";
+pub const AK_EMAIL: &str = "AK_EMAIL";
+pub const EDITOR: &str = "EDITOR";
 
 /// Template for interactive commit messages.
 ///
@@ -31,7 +31,7 @@ const EDITOR: &str = "EDITOR";
 ///
 /// The rendered message is stored as an intermediate "commit:pending" event to
 /// reserve and discover the final monotonically-increasing commit id.
-const COMMIT_TEMPLATE: &str = r#"%type% %summary%
+pub const COMMIT_TEMPLATE: &str = r#"%type% %summary%
 
 %body%
 
@@ -117,7 +117,7 @@ struct CommitRecord<'a> {
 
 /// Define the CLI for the local VCS and parse arguments.
 ///
-/// This is side-effect free and only sets up subcommands and flags.
+/// This is side-effect-free and only sets up subcommands and flags.
 fn apps() -> ArgMatches {
     Command::new("ak")
         .about("a new vcs")
@@ -187,7 +187,7 @@ fn apps() -> ArgMatches {
 ///
 /// Layout:
 /// - .eikyu/cubes/YYYY-MM/<author>.cube
-fn cube_path_for(author: &str) -> String {
+pub fn cube_path_for(author: &str) -> String {
     let ym = chrono::Local::now().format("%Y-%m").to_string();
     create_dir_all(format!(
         ".eikyu{MAIN_SEPARATOR_STR}cubes{MAIN_SEPARATOR_STR}{ym}"
@@ -201,7 +201,7 @@ fn cube_path_for(author: &str) -> String {
 /// Append a phenomenon/noumenon string pair into the target cube.
 ///
 /// Returns the byte offset of the appended record (useful for random access).
-fn save_string_in_cube(cube_path: &str, phenomenon: &str, content: &str) -> std::io::Result<u64> {
+pub fn save_string_in_cube(cube_path: &str, phenomenon: &str, content: &str) -> std::io::Result<u64> {
     let mut w = Writer::create(cube_path)?;
     let off = w.append(phenomenon, content)?;
     Ok(off)
@@ -210,7 +210,7 @@ fn save_string_in_cube(cube_path: &str, phenomenon: &str, content: &str) -> std:
 /// Read all events from a cube, filter to commits, and return them ordered by id.
 ///
 /// The index is rebuilt from the log and used to fetch each event.
-fn read_commits_from_cube(cube_path: &str) -> std::io::Result<Vec<Event>> {
+pub fn read_commits_from_cube(cube_path: &str) -> std::io::Result<Vec<Event>> {
     let mut w = Writer::create(cube_path)?;
     let idx = w.rebuild_index()?; // id -> offset
     let mut out = Vec::with_capacity(idx.len());
@@ -224,7 +224,7 @@ fn read_commits_from_cube(cube_path: &str) -> std::io::Result<Vec<Event>> {
 }
 
 /// Return the last commit id present in the cube, if any.
-fn last_commit_id(cube_path: &str) -> std::io::Result<Option<u64>> {
+pub fn last_commit_id(cube_path: &str) -> std::io::Result<Option<u64>> {
     let commits = read_commits_from_cube(cube_path)?;
     Ok(commits.last().map(|e| e.id))
 }
@@ -307,7 +307,7 @@ pub fn npm_project_hook() -> Result<(), Error> {
 /// Auto-detect project type and run the appropriate pre-commit hook.
 ///
 /// No-op for unrecognized projects.
-fn hooks() -> Result<(), Error> {
+pub fn hooks() -> Result<(), Error> {
     if Path::new("Cargo.toml").exists() {
         cargo_project_hook()
     } else if Path::new("package.json").exists() {

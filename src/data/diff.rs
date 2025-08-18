@@ -156,8 +156,8 @@ pub fn diff() -> ExitCode {
 ///   so that internal state does not pollute the diff output.
 ///
 /// Returns:
-/// - Ok(Vec<String>) sorted by the caller for stable output
-/// - Err(io::Error) if traversal cannot be constructed or read
+/// - Ok(`Vec<String>`) sorted by the caller for stable output
+/// - Err(`io::Error`) if traversal cannot be constructed or read
 fn collect_files(root: &Path) -> io::Result<Vec<String>> {
     // Precompute a path prefix that will be stripped to create relative paths.
     let dir = format!("{}{}", root.display(), MAIN_SEPARATOR_STR);
