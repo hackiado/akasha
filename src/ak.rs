@@ -103,22 +103,22 @@ impl PreCommit {
 ///
 /// This is the durable record extracted from the intermediate "commit:pending" reservation.
 #[derive(Serialize)]
-struct CommitRecord<'a> {
-    id: u64,
-    parent: Option<u64>,
-    ty: &'a str,
-    summary: &'a str,
-    body: &'a str,
-    author: &'a str,
-    author_email: &'a str,
+pub struct CommitRecord<'a> {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub ty: &'a str,
+    pub summary: &'a str,
+    pub body: &'a str,
+    pub author: &'a str,
+    pub author_email: &'a str,
     /// Milliseconds since Unix epoch (UTC).
-    timestamp: u64,
+    pub timestamp: u64,
 }
 
 /// Define the CLI for the local VCS and parse arguments.
 ///
 /// This is side-effect-free and only sets up subcommands and flags.
-fn apps() -> ArgMatches {
+pub fn apps() -> ArgMatches {
     Command::new("ak")
         .about("a new vcs")
         .subcommand(Command::new("init").about("init data"))
