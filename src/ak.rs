@@ -201,7 +201,11 @@ pub fn cube_path_for(author: &str) -> String {
 /// Append a phenomenon/noumenon string pair into the target cube.
 ///
 /// Returns the byte offset of the appended record (useful for random access).
-pub fn save_string_in_cube(cube_path: &str, phenomenon: &str, content: &str) -> std::io::Result<u64> {
+pub fn save_string_in_cube(
+    cube_path: &str,
+    phenomenon: &str,
+    content: &str,
+) -> std::io::Result<u64> {
     let mut w = Writer::create(cube_path)?;
     let off = w.append(phenomenon, content)?;
     Ok(off)
